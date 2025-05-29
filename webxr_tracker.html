@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebXR 6DOF Tracker</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+            background: #000;
+            color: #fff;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 400px;
+            border: 1px solid #333;
+        }
+        .controls {
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            font-size: 16px;
+            background: #0066cc;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #0088ff;
+        }
+        button:disabled {
+            background: #666;
+            cursor: not-allowed;
+        }
+        .info {
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+            background: #222;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .config {
+            margin: 20px 0;
+            padding: 10px;
+            background: #333;
+            border-radius: 5px;
+        }
+        input {
+            padding: 5px;
+            margin: 5px;
+            background: #222;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebXR 6DOF Tracker with OSC</h1>
+    
+    <div class="config">
+        <h3>OSC Configuration</h3>
+        <label>Target IP: <input type="text" id="oscIP" value="192.168.1.100" placeholder="Your Mac IP"></label>
+        <label>Port: <input type="number" id="oscPort" value="8080" placeholder="OSC Port"></label>
+        <button onclick="updateOSCConfig()">Update OSC Settings</button>
+    </div>
+    
+    <div class="controls">
+        <button id="startXR">Start WebXR Session</button>
+        <button id="stopXR" disabled>Stop Session</button>
+        <button onclick="toggleOSC()" id="oscToggle">Start OSC Streaming</button>
+    </div>
+    
+    <canvas id="canvas"></canvas>
+    
+    <div class="info">
+        <div><strong>HMD Position:</strong> <span id="hmdPos">0, 0, 0</span> | <strong>Rotation:</strong> <span id="hmdRot">0, 0, 0</span></div>
+        <div><strong>Controller 0:</strong> <span id="ctrl0Pos">0, 0, 0</span> | <strong>Rotation:</strong> <span id="ctrl0Rot">0, 0, 0</span></div>
+        <div><strong>Controller 1:</strong> <span id="ctrl1Pos">0, 0, 0</span> | <strong>Rotation:</strong> <span id="ctrl1Rot">0, 0, 0</span></div>
+        <div><strong>OSC Status:</strong> <span id="oscStatus">Stopped</span></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Global variables
+        let scene, camera, renderer, xrSession;
+        let room, controllers = [], hmdMarker;
+        let oscEnabled = false;
+        let oscIP = '192.168.1.100';
+        let oscPort = 8080;
+        let lastOSCTime = 0;
+        
+        // Initialize Three.js scene
+        function initScene() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / 400, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
+            renderer.setSize(window.innerWidth - 40, 400);
+            renderer.setClearColor(0x111111);
+            renderer.xr.enabled = true;
+            
+            // Add lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(1, 1, 1);
+            scene.add(directionalLight);
+            
+            // Create 5x5m room
+            createRoom();
+            
+            // Create HMD marker
+            createHMDMarker();
+            
+            // Create controller models
+            createControllers();
+            
+            // Position camera for overview
+            camera.position.set(3, 3, 3);
+            camera.lookAt(0, 1.5, 0);
+            
+            animate();
+        }
+        
+        function createRoom() {
+            // Floor (5x5m)
+            const floorGeometry = new THREE.PlaneGeometry(5, 5);
+            const floorMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+            const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+            
+            // Grid on floor
+            const gridHelper = new THREE.GridHelper(5, 10, 0x666666, 0x444444);
+            scene.add(gridHelper);
+            
+            // Walls
+            const wallMaterial = new THREE.MeshLambertMaterial({ color: 0x555555, transparent: true, opacity: 0.3 });
+            
+            // Back wall
+            const wallGeometry = new THREE.PlaneGeometry(5, 3);
+            const backWall = new THREE.Mesh(wallGeometry, wallMaterial);
+            backWall.position.set(0, 1.5, -2.5);
+            scene.add(backWall);
+            
+            // Side walls
+            const leftWall = new THREE.Mesh(wallGeometry, wallMaterial);
+            leftWall.rotation.y = Math.PI / 2;
+            leftWall.position.set(-2.5, 1.5, 0);
+            scene.add(leftWall);
+            
+            const rightWall = new THREE.Mesh(wallGeometry, wallMaterial);
+            rightWall.rotation.y = -Math.PI / 2;
+            rightWall.position.set(2.5, 1.5, 0);
+            scene.add(rightWall);
+        }
+        
+        function createHMDMarker() {
+            const hmdGeometry = new THREE.BoxGeometry(0.2, 0.15, 0.1);
+            const hmdMaterial = new THREE.MeshLambertMaterial({ color: 0x00ff00 });
+            hmdMarker = new THREE.Mesh(hmdGeometry, hmdMaterial);
+            hmdMarker.position.set(0, 1.6, 0);
+            scene.add(hmdMarker);
+        }
+        
+        function createControllers() {
+            for (let i = 0; i < 2; i++) {
+                // Controller body
+                const controllerGroup = new THREE.Group();
+                
+                // Main body (cylinder)
+                const bodyGeometry = new THREE.CylinderGeometry(0.02, 0.025, 0.15);
+                const bodyMaterial = new THREE.MeshLambertMaterial({ color: i === 0 ? 0xff0000 : 0x0000ff });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                controllerGroup.add(body);
+                
+                // Ring (torus)
+                const ringGeometry = new THREE.TorusGeometry(0.04, 0.005, 8, 16);
+                const ringMaterial = new THREE.MeshLambertMaterial({ color: 0x888888 });
+                const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+                ring.position.y = 0.05;
+                ring.rotation.x = Math.PI / 2;
+                controllerGroup.add(ring);
+                
+                // Trigger
+                const triggerGeometry = new THREE.BoxGeometry(0.01, 0.02, 0.03);
+                const triggerMaterial = new THREE.MeshLambertMaterial({ color: 0x666666 });
+                const trigger = new THREE.Mesh(triggerGeometry, triggerMaterial);
+                trigger.position.set(0, -0.02, 0.04);
+                controllerGroup.add(trigger);
+                
+                controllers.push(controllerGroup);
+                scene.add(controllerGroup);
+            }
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (xrSession) {
+                // XR rendering handled by WebXR
+            } else {
+                renderer.render(scene, camera);
+            }
+        }
+        
+        // WebXR session management
+        async function startXRSession() {
+            if (!navigator.xr) {
+                alert('WebXR not supported');
+                return;
+            }
+            
+            try {
+                xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    requiredFeatures: ['local-floor']
+                });
+                
+                await renderer.xr.setSession(xrSession);
+                
+                xrSession.addEventListener('end', onXRSessionEnd);
+                
+                // Set up input sources
+                xrSession.addEventListener('inputsourceschange', onInputSourcesChange);
+                
+                document.getElementById('startXR').disabled = true;
+                document.getElementById('stopXR').disabled = false;
+                
+                // Start render loop
+                renderer.setAnimationLoop(renderXR);
+                
+            } catch (error) {
+                console.error('Failed to start XR session:', error);
+                alert('Failed to start XR session: ' + error.message);
+            }
+        }
+        
+        function stopXRSession() {
+            if (xrSession) {
+                xrSession.end();
+            }
+        }
+        
+        function onXRSessionEnd() {
+            xrSession = null;
+            document.getElementById('startXR').disabled = false;
+            document.getElementById('stopXR').disabled = true;
+            renderer.setAnimationLoop(null);
+            animate(); // Resume regular rendering
+        }
+        
+        function onInputSourcesChange(event) {
+            console.log('Input sources changed:', event);
+        }
+        
+        function renderXR(timestamp, frame) {
+            if (!frame) return;
+            
+            const pose = frame.getViewerPose(renderer.xr.getReferenceSpace());
+            if (pose) {
+                // Update HMD position
+                const hmdPosition = pose.transform.position;
+                const hmdOrientation = pose.transform.orientation;
+                
+                // Convert quaternion to Euler angles
+                const euler = new THREE.Euler().setFromQuaternion(
+                    new THREE.Quaternion(hmdOrientation.x, hmdOrientation.y, hmdOrientation.z, hmdOrientation.w)
+                );
+                
+                // Update display
+                updateDisplay('hmd', hmdPosition, euler);
+                
+                // Update 3D marker
+                hmdMarker.position.set(hmdPosition.x, hmdPosition.y, hmdPosition.z);
+                hmdMarker.quaternion.set(hmdOrientation.x, hmdOrientation.y, hmdOrientation.z, hmdOrientation.w);
+                
+                // Send OSC data
+                if (oscEnabled && timestamp - lastOSCTime > 16) { // ~60fps
+                    sendOSCData('hmd', hmdPosition, euler);
+                    lastOSCTime = timestamp;
+                }
+            }
+            
+            // Handle controllers
+            const inputSources = xrSession.inputSources;
+            for (let i = 0; i < Math.min(inputSources.length, 2); i++) {
+                const inputSource = inputSources[i];
+                if (inputSource.gripSpace) {
+                    const gripPose = frame.getPose(inputSource.gripSpace, renderer.xr.getReferenceSpace());
+                    if (gripPose) {
+                        const ctrlPosition = gripPose.transform.position;
+                        const ctrlOrientation = gripPose.transform.orientation;
+                        
+                        const euler = new THREE.Euler().setFromQuaternion(
+                            new THREE.Quaternion(ctrlOrientation.x, ctrlOrientation.y, ctrlOrientation.z, ctrlOrientation.w)
+                        );
+                        
+                        // Update display
+                        updateDisplay(`ctrl${i}`, ctrlPosition, euler);
+                        
+                        // Update 3D model
+                        if (controllers[i]) {
+                            controllers[i].position.set(ctrlPosition.x, ctrlPosition.y, ctrlPosition.z);
+                            controllers[i].quaternion.set(ctrlOrientation.x, ctrlOrientation.y, ctrlOrientation.z, ctrlOrientation.w);
+                        }
+                        
+                        // Send OSC data
+                        if (oscEnabled && timestamp - lastOSCTime > 16) {
+                            sendOSCData(`controller${i}`, ctrlPosition, euler);
+                        }
+                    }
+                }
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        function updateDisplay(device, position, euler) {
+            const posElement = document.getElementById(`${device}Pos`);
+            const rotElement = document.getElementById(`${device}Rot`);
+            
+            if (posElement) {
+                posElement.textContent = `${position.x.toFixed(3)}, ${position.y.toFixed(3)}, ${position.z.toFixed(3)}`;
+            }
+            if (rotElement) {
+                const yaw = (euler.y * 180 / Math.PI).toFixed(1);
+                const pitch = (euler.x * 180 / Math.PI).toFixed(1);
+                const roll = (euler.z * 180 / Math.PI).toFixed(1);
+                rotElement.textContent = `${yaw}°, ${pitch}°, ${roll}°`;
+            }
+        }
+        
+        // OSC functionality (simulated - real implementation would need WebSocket bridge)
+        function toggleOSC() {
+            oscEnabled = !oscEnabled;
+            document.getElementById('oscToggle').textContent = oscEnabled ? 'Stop OSC Streaming' : 'Start OSC Streaming';
+            document.getElementById('oscStatus').textContent = oscEnabled ? `Streaming to ${oscIP}:${oscPort}` : 'Stopped';
+            
+            if (oscEnabled) {
+                console.log(`OSC streaming started to ${oscIP}:${oscPort}`);
+            }
+        }
+        
+        function updateOSCConfig() {
+            oscIP = document.getElementById('oscIP').value;
+            oscPort = parseInt(document.getElementById('oscPort').value);
+            console.log(`OSC config updated: ${oscIP}:${oscPort}`);
+        }
+        
+        function sendOSCData(device, position, euler) {
+            // This is a simulation - real implementation would send via WebSocket to OSC bridge
+            const oscMessage = {
+                address: `/${device}/position`,
+                args: [position.x, position.y, position.z, euler.y, euler.x, euler.z] // x,y,z,yaw,pitch,roll
+            };
+            
+            // Log for debugging (remove in production)
+            if (Math.random() < 0.01) { // Log 1% of messages to avoid spam
+                console.log(`OSC: ${oscMessage.address}`, oscMessage.args);
+            }
+            
+            // In a real implementation, you would send this via WebSocket to an OSC bridge
+            // Example: websocket.send(JSON.stringify(oscMessage));
+        }
+        
+        // Event listeners
+        document.getElementById('startXR').addEventListener('click', startXRSession);
+        document.getElementById('stopXR').addEventListener('click', stopXRSession);
+        
+        // Initialize
+        initScene();
+        
+        // Note: For real OSC transmission, you'll need a WebSocket-to-OSC bridge
+        console.log('WebXR Tracker initialized. Note: OSC transmission requires WebSocket bridge for actual network sending.');
+    </script>
+    
+    <div style="margin-top: 20px; padding: 15px; background: #444; border-radius: 5px;">
+        <h3>Setup Instructions:</h3>
+        <ol>
+            <li>Enter your Mac's IP address and desired OSC port</li>
+            <li>Click "Start WebXR Session" and put on your Quest</li>
+            <li>Click "Start OSC Streaming" to begin data transmission</li>
+            <li>In Max/MSP, use <code>udpreceive</code> objects on the specified port</li>
+        </ol>
+        <p><strong>Note:</strong> This demo shows OSC data in console. For real OSC transmission, you'll need a WebSocket-to-OSC bridge running on your Mac.</p>
+    </div>
+</body>
+</html>
